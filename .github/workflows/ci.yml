@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        if: runner.os == 'Linux'
+        run: cargo fmt --all --check
+      - name: Clippy
+        if: runner.os == 'Linux'
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+
+  wasm:
+    name: WebAssembly build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - name: Build WASM package
+        run: wasm-pack build crates/steadyframe-wasm --release --target web --out-dir ../../web/pkg
+      - name: Smoke-test the WASM module in Node
+        run: node scripts/wasm-smoke-test.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-app
+          path: web/
+
+  action:
+    name: Action self-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Install FFmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - name: Generate a shaky test clip
+        run: |
+          mkdir -p test-media
+          ffmpeg -v error -y -f lavfi -i "testsrc2=size=1600x900:rate=30" -t 3 \
+            -vf "rotate=0.03*sin(n*1.3):fillcolor=black,crop=1280:720:160+60*sin(n*1.7)+2*n:90+45*sin(n*2.3)" \
+            -c:v libx264 -pix_fmt yuv420p test-media/shaky.mp4
+      - name: Stabilize with the action
+        id: sf
+        uses: ./
+        with:
+          files: test-media/*.mp4
+          version: source
+          preset: smooth
+          compare: side-by-side
+          args: --encoder-preset veryfast
+          artifact-name: action-self-test
+      - name: Check results
+        run: |
+          echo "Outputs: ${{ steps.sf.outputs.files }}"
+          test "${{ steps.sf.outputs.count }}" = "1"
+          test -f stabilized/test-media/shaky_stabilized.mp4
+          jq -e '.results[0].stats.reduction_pct > 80' "${{ steps.sf.outputs.report }}"

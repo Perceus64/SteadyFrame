@@ -1,0 +1,19 @@
+[package]
+name = "steadyframe-core"
+description = "Video stabilization engine: feature tracking, motion estimation, path smoothing, crop, warp, rolling-shutter and gyro support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["parallel"]
+# Multithreaded warping and tracking (native only; leave off for wasm32).
+parallel = ["dep:rayon"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+rayon = { workspace = true, optional = true }

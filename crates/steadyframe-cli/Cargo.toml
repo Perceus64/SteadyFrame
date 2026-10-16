@@ -1,0 +1,21 @@
+[package]
+name = "steadyframe-cli"
+description = "Command-line video stabilizer (ffmpeg pipeline) built on steadyframe-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "steadyframe"
+path = "src/main.rs"
+
+[dependencies]
+steadyframe-core = { workspace = true, features = ["parallel"] }
+serde.workspace = true
+serde_json.workspace = true
+rayon.workspace = true
+clap = { version = "4.5", features = ["derive", "wrap_help"] }
+anyhow = "1"

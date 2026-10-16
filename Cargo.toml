@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/steadyframe-core",
+    "crates/steadyframe-wasm",
+    "crates/steadyframe-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Charbel Bachaalany"]
+repository = "https://github.com/Perceus64/steadyframe"
+homepage = "https://github.com/Perceus64/steadyframe"
+rust-version = "1.75"
+
+[workspace.dependencies]
+steadyframe-core = { path = "crates/steadyframe-core", version = "0.1.0", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+rayon = "1.10"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[profile.test]
+opt-level = 2

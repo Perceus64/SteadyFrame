@@ -1,0 +1,6 @@
+/target
+/web/pkg
+*.mp4
+*.mov
+!examples/**/*.mp4
+.DS_Store

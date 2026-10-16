@@ -1,0 +1,39 @@
+# Copy to .github/workflows/stabilize-videos.yml in any repository.
+# Every push that adds videos under media/ gets stabilized copies committed back,
+# plus a downloadable artifact and a shake report in the job summary.
+name: Stabilize videos
+
+on:
+  push:
+    paths: ["media/**/*.mp4", "media/**/*.mov", "media/**/*.MP4", "media/**/*.MOV"]
+  workflow_dispatch:
+    inputs:
+      preset:
+        description: "Preset"
+        default: "handheld"
+        type: choice
+        options: [handheld, smooth, walking, vehicle, action, cinematic, tripod, gentle, gyro]
+
+permissions:
+  contents: write
+
+jobs:
+  stabilize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true # if your videos live in Git LFS
+
+      - uses: Perceus64/steadyframe@v0.1.0
+        id: sf
+        with:
+          files: "media/**/*.mp4 media/**/*.MP4 media/**/*.mov media/**/*.MOV"
+          output-dir: stabilized
+          preset: ${{ inputs.preset || 'handheld' }}
+          # config: .github/steadyframe.json   # settings saved from the web app
+          args: --crop dynamic --crf 20
+          compare: none
+          commit: true
+
+      - run: echo "Stabilized ${{ steps.sf.outputs.count }} video(s)"

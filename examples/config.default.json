@@ -1,0 +1,73 @@
+{
+  "analysis": {
+    "analysis_width": 640,
+    "motion_model": "similarity",
+    "motion_source": "optical_flow",
+    "max_features": 400,
+    "feature_quality": 0.01,
+    "min_distance": 10.0,
+    "lk_radius": 7,
+    "lk_levels": 4,
+    "lk_iterations": 20,
+    "fb_threshold": 1.0,
+    "ransac_threshold": 1.5,
+    "ransac_iterations": 400,
+    "min_inliers": 12
+  },
+  "smoothing": {
+    "method": "gaussian",
+    "radius": 30.0,
+    "translation": 1.0,
+    "rotation": 1.0,
+    "zoom": 1.0,
+    "l1_weights": [
+      10.0,
+      1.0,
+      100.0
+    ],
+    "l1_iterations": 400,
+    "tripod": false,
+    "reference_frame": 0,
+    "horizon_lock": false,
+    "horizon_angle": 0.0,
+    "zoom_lock": false,
+    "limit_shift": 0.15,
+    "limit_rotation": 8.0,
+    "limit_scale": 0.15
+  },
+  "crop": {
+    "mode": "fixed",
+    "max_zoom": 1.4,
+    "extra_zoom": 1.0,
+    "dynamic_smoothing": 45.0
+  },
+  "render": {
+    "interpolation": "bilinear",
+    "border": "black",
+    "border_color": [
+      0,
+      0,
+      0,
+      255
+    ],
+    "output_width": 0,
+    "output_height": 0,
+    "compare": "none"
+  },
+  "rolling_shutter": {
+    "enabled": false,
+    "readout": 0.5
+  },
+  "gyro": {
+    "orientation": "XYZ",
+    "time_offset": 0.0,
+    "hfov": 75.0,
+    "focal_px": 0.0,
+    "auto_sync": true,
+    "sync_range": 1.0,
+    "sync_orientation": true,
+    "sync_focal": true,
+    "time_unit": "auto",
+    "angle_unit": "auto"
+  }
+}

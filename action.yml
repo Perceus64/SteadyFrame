@@ -1,0 +1,155 @@
+name: "Steadyframe video stabilizer"
+description: "Stabilize shaky videos in your repository with a fast Rust stabilizer (optical flow, gyro, rolling shutter, L1 paths)."
+author: "Charbel Bachaalany"
+branding:
+  icon: "video"
+  color: "green"
+
+inputs:
+  files:
+    description: "Glob pattern(s) of videos to stabilize, separated by newlines or spaces (bash globstar syntax)."
+    required: false
+    default: "**/*.mp4 **/*.MP4 **/*.mov **/*.MOV"
+  output-dir:
+    description: "Directory for stabilized videos (folder structure of the inputs is kept). Empty = next to each input."
+    required: false
+    default: "stabilized"
+  suffix:
+    description: "Suffix added to output file names."
+    required: false
+    default: "_stabilized"
+  preset:
+    description: "Preset: handheld, smooth, walking, vehicle, action, cinematic, tripod, gentle, gyro."
+    required: false
+    default: "handheld"
+  config:
+    description: "Path to a JSON config (full or partial), e.g. one saved from the web app."
+    required: false
+    default: ""
+  args:
+    description: "Extra steadyframe CLI arguments, e.g. '--horizon-lock --crop dynamic --crf 20'."
+    required: false
+    default: ""
+  compare:
+    description: "Also render a before/after video: none, side-by-side or split."
+    required: false
+    default: "none"
+  skip-existing:
+    description: "Skip inputs whose output already exists (recommended with commit: true)."
+    required: false
+    default: "true"
+  fail-on-error:
+    description: "Fail the step if any video fails."
+    required: false
+    default: "true"
+  upload-artifact:
+    description: "Upload stabilized videos and the report as a workflow artifact."
+    required: false
+    default: "true"
+  artifact-name:
+    description: "Name of the uploaded artifact."
+    required: false
+    default: "stabilized-videos"
+  commit:
+    description: "Commit the stabilized videos back to the repository (needs 'contents: write' permission)."
+    required: false
+    default: "false"
+  commit-message:
+    description: "Commit message used with commit: true."
+    required: false
+    default: "chore: add stabilized videos [skip ci]"
+  version:
+    description: "steadyframe release to download (e.g. v0.1.0), 'latest', or 'source' to build from the action's source. Default: the action's own ref, falling back to building from source."
+    required: false
+    default: ""
+
+outputs:
+  files:
+    description: "Newline-separated list of stabilized output files."
+    value: ${{ steps.run.outputs.files }}
+  count:
+    description: "Number of videos stabilized."
+    value: ${{ steps.run.outputs.count }}
+  failed:
+    description: "Number of videos that failed."
+    value: ${{ steps.run.outputs.failed }}
+  report:
+    description: "Path to the JSON report with shake metrics."
+    value: ${{ steps.run.outputs.report }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install FFmpeg
+      shell: bash
+      run: |
+        if command -v ffmpeg >/dev/null && command -v ffprobe >/dev/null; then
+          echo "FFmpeg already installed: $(ffmpeg -version | head -n1)"
+        elif [ "$RUNNER_OS" = "Linux" ]; then
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg >/dev/null
+        elif [ "$RUNNER_OS" = "macOS" ]; then
+          brew install ffmpeg >/dev/null
+        elif [ "$RUNNER_OS" = "Windows" ]; then
+          choco install ffmpeg -y --no-progress >/dev/null
+        fi
+        ffmpeg -version | head -n1
+
+    - name: Restore build cache
+      if: inputs.version == 'source' || (inputs.version == '' && !startsWith(github.action_ref, 'v'))
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          ${{ github.action_path }}/target
+        key: steadyframe-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('{0}/Cargo.lock', github.action_path), format('{0}/crates/**/*.rs', github.action_path)) }}
+
+    - name: Install steadyframe
+      shell: bash
+      env:
+        SF_VERSION: ${{ inputs.version }}
+        SF_ACTION_REF: ${{ github.action_ref }}
+        SF_ACTION_REPO: ${{ github.action_repository }}
+        SF_ACTION_PATH: ${{ github.action_path }}
+      run: bash "$SF_ACTION_PATH/action/install.sh"
+
+    - name: Stabilize videos
+      id: run
+      shell: bash
+      env:
+        SF_FILES: ${{ inputs.files }}
+        SF_OUTPUT_DIR: ${{ inputs.output-dir }}
+        SF_SUFFIX: ${{ inputs.suffix }}
+        SF_PRESET: ${{ inputs.preset }}
+        SF_CONFIG: ${{ inputs.config }}
+        SF_ARGS: ${{ inputs.args }}
+        SF_COMPARE: ${{ inputs.compare }}
+        SF_SKIP_EXISTING: ${{ inputs.skip-existing }}
+        SF_FAIL_ON_ERROR: ${{ inputs.fail-on-error }}
+      run: bash "${{ github.action_path }}/action/run.sh"
+
+    - name: Upload artifact
+      if: inputs.upload-artifact == 'true' && steps.run.outputs.count != '0'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: |
+          ${{ steps.run.outputs.artifact-paths }}
+        if-no-files-found: warn
+
+    - name: Commit results
+      if: inputs.commit == 'true' && steps.run.outputs.count != '0'
+      shell: bash
+      env:
+        SF_MESSAGE: ${{ inputs.commit-message }}
+        SF_LIST: ${{ steps.run.outputs.list-file }}
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        while IFS= read -r f; do [ -n "$f" ] && git add -- "$f"; done < "$SF_LIST"
+        if git diff --cached --quiet; then
+          echo "Nothing new to commit."
+        else
+          git commit -m "$SF_MESSAGE"
+          git push
+        fi

@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Steadyframe</title>
+  <meta name="description" content="Stabilize shaky video in your browser. Nothing is uploaded.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231d2330'/%3E%3Cpath d='M4 20c4-9 6 6 10-3s6 4 14-6' stroke='%23ef6f8a' stroke-width='2' fill='none'/%3E%3Cpath d='M4 17c8-2 16-3 24-5' stroke='%234fd1c5' stroke-width='2.5' fill='none'/%3E%3C/svg%3E">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M3 20c4-9 6 6 10-3s6 4 16-6" class="raw"/><path d="M3 17c8-2 17-3 26-5" class="smooth"/></svg>
+      <span>Steadyframe</span>
+    </div>
+    <div class="top-actions">
+      <label class="btn ghost" for="file">Open video</label>
+      <input id="file" type="file" accept="video/*" hidden>
+      <button class="btn primary" id="export" disabled>Export MP4</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="stage" aria-label="Preview">
+      <div id="drop" class="drop">
+        <div class="drop-inner">
+          <h1>Drop a shaky clip here</h1>
+          <p>Stabilization runs on your device in WebAssembly. Your video never leaves this tab.</p>
+          <label class="btn primary" for="file">Choose a video</label>
+          <p class="fine">MP4, MOV or WebM. For GoPro gyro data or keeping audio, use the CLI or GitHub Action.</p>
+        </div>
+      </div>
+
+      <div id="workspace" class="workspace" hidden>
+        <div class="viewer-bar">
+          <div class="segmented" role="radiogroup" aria-label="Preview mode">
+            <button role="radio" aria-checked="true" data-mode="split">Before / after</button>
+            <button role="radio" aria-checked="false" data-mode="stab">Stabilized</button>
+            <button role="radio" aria-checked="false" data-mode="orig">Original</button>
+            <button role="radio" aria-checked="false" data-mode="side">Side by side</button>
+          </div>
+          <div class="meta" id="meta"></div>
+        </div>
+
+        <div class="viewer" id="viewer">
+          <canvas id="view"></canvas>
+          <div class="divider" id="divider" hidden><span></span></div>
+          <div class="busy" id="busy" hidden>
+            <div class="busy-card">
+              <p id="busyText">Analyzing motion…</p>
+              <div class="bar"><div id="busyBar"></div></div>
+              <button class="btn ghost small" id="cancel">Cancel</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="transport">
+          <button class="btn icon" id="play" aria-label="Play preview" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path id="playIcon" d="M7 5l12 7-12 7z"/></svg>
+          </button>
+          <input type="range" id="scrub" min="0" max="0" value="0" step="1" aria-label="Frame" disabled>
+          <span class="frame-no" id="frameNo">0 / 0</span>
+        </div>
+
+        <figure class="path">
+          <figcaption>
+            <span>Camera path</span>
+            <span class="legend"><i class="k-raw"></i>Recorded <i class="k-smooth"></i>Stabilized</span>
+            <select id="channel" aria-label="Path channel">
+              <option value="0">Horizontal</option>
+              <option value="1">Vertical</option>
+              <option value="2">Rotation</option>
+            </select>
+          </figcaption>
+          <canvas id="graph" height="140"></canvas>
+        </figure>
+
+        <div class="stats" id="stats" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <aside class="panel" aria-label="Settings">
+      <div class="panel-head">
+        <label for="preset">Preset</label>
+        <select id="preset"></select>
+        <p class="preset-desc" id="presetDesc"></p>
+      </div>
+      <div id="sections"></div>
+      <details class="section">
+        <summary>Gyro data</summary>
+        <div class="fields">
+          <p class="hint">Load a gyro log (CSV with time + 3 axes) or a GoPro GPMF track (.bin). Time offset, axis orientation and lens focal length are matched to the video automatically.</p>
+          <label class="btn ghost small" for="gyroFile">Load gyro file</label>
+          <input id="gyroFile" type="file" accept=".csv,.txt,.tsv,.bin,.gpmf" hidden>
+          <button class="btn ghost small" id="gyroClear" hidden>Remove gyro</button>
+          <p class="hint" id="gyroInfo"></p>
+          <div id="gyroFields"></div>
+        </div>
+      </details>
+      <details class="section">
+        <summary>Export &amp; data</summary>
+        <div class="fields">
+          <label class="field">
+            <span>Quality</span>
+            <select id="bitrate">
+              <option value="4">Small (4 Mbps)</option>
+              <option value="10" selected>High (10 Mbps)</option>
+              <option value="25">Very high (25 Mbps)</option>
+            </select>
+          </label>
+          <label class="field toggle">
+            <span>Export before/after side by side</span>
+            <input type="checkbox" id="exportCompare">
+          </label>
+          <div class="btn-row">
+            <button class="btn ghost small" id="saveTrack" disabled>Save motion track</button>
+            <label class="btn ghost small" for="loadTrack">Load motion track</label>
+            <input id="loadTrack" type="file" accept=".json" hidden>
+          </div>
+          <div class="btn-row">
+            <button class="btn ghost small" id="saveConfig">Save settings</button>
+            <label class="btn ghost small" for="loadConfig">Load settings</label>
+            <input id="loadConfig" type="file" accept=".json" hidden>
+            <button class="btn ghost small" id="savePlan" disabled>Save transforms</button>
+          </div>
+          <p class="hint">Settings files work with the CLI (<code>--config</code>) and the GitHub Action (<code>config</code> input). Browser exports have no audio track.</p>
+        </div>
+      </details>
+      <p class="version" id="version"></p>
+    </aside>
+  </main>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+  <video id="video" playsinline muted preload="auto" hidden></video>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
