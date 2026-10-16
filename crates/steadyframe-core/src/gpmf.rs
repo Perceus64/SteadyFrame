@@ -71,6 +71,11 @@ fn walk(buf: &[u8], chunks: &mut Vec<Chunk>, depth: usize) -> Result<()> {
             break;
         }
         if start + len > buf.len() {
+            // A cut-off final record (e.g. a recording that ended abruptly):
+            // keep everything parsed so far instead of failing.
+            if depth == 0 && !chunks.is_empty() {
+                break;
+            }
             return Err(Error::Parse(format!("GPMF: truncated '{}' entry", String::from_utf8_lossy(key))));
         }
         let data = &buf[start..start + len];
@@ -206,5 +211,10 @@ mod tests {
         assert!((gd.t[4] - 1.0).abs() < 1e-9);
         // Columns were Z,X,Y → sample 1: Z=0.1, X=0.2, Y=-0.3
         assert_eq!(gd.w[1], [0.2, -0.3, 0.1]);
+
+        // A truncated trailing payload keeps the samples parsed before it.
+        let mut cut = payloads.clone();
+        cut.extend_from_slice(b"DEVC\0\x01\x01\x00");
+        assert_eq!(parse_gpmf(&cut).unwrap().len(), 8);
     }
 }

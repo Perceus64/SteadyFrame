@@ -10,7 +10,10 @@ use crate::geometry::{Params, LSX, LSY, NPARAMS, PX, PY, ROT, SHEAR, TX, TY};
 /// isn't pulled back, and doesn't latch onto a noisy first/last frame.
 fn padded(x: &[f64], r: usize, fit: usize) -> Vec<f64> {
     let n = x.len();
-    let m = fit.clamp(2, n);
+    if n < 2 {
+        return vec![x.first().copied().unwrap_or(0.0); n + 2 * r];
+    }
+    let m = fit.max(2).min(n);
     let line_at = |idx: &[usize], at: f64| -> f64 {
         let k = idx.len() as f64;
         let mx = idx.iter().map(|&i| i as f64).sum::<f64>() / k;

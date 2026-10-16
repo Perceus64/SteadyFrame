@@ -102,7 +102,11 @@ runs:
           ~/.cargo/registry
           ~/.cargo/git
           ${{ github.action_path }}/target
-        key: steadyframe-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('{0}/Cargo.lock', github.action_path), format('{0}/crates/**/*.rs', github.action_path)) }}
+        # hashFiles() only sees the workspace, so key on the action ref too (the
+        # action's own files live outside the workspace when used from another repo).
+        key: steadyframe-${{ runner.os }}-${{ runner.arch }}-${{ github.action_ref }}-${{ hashFiles(format('{0}/Cargo.lock', github.action_path), format('{0}/crates/**/*.rs', github.action_path)) }}
+        restore-keys: |
+          steadyframe-${{ runner.os }}-${{ runner.arch }}-
 
     - name: Install steadyframe
       shell: bash

@@ -280,7 +280,7 @@ impl Plan {
         let mut notes: Vec<String> = Vec::new();
 
         let motions: Vec<Mat3> = match source {
-            MotionSource::OpticalFlow => track.motions.iter().map(|m| m.m).collect(),
+            MotionSource::OpticalFlow => fill_lost_motions(&track.motions),
             MotionSource::Gyro | MotionSource::Hybrid => {
                 let g = gyro.ok_or_else(|| {
                     Error::Gyro(format!("motion_source '{source}' needs gyro data (CSV or GoPro GPMF)"))
@@ -313,7 +313,7 @@ impl Plan {
                 let gm = gyro_motions(g, &orient, offset, f, fps, n);
                 if source == MotionSource::Hybrid && !gyro_ok {
                     notes.push("falling back to optical flow only".into());
-                    track.motions.iter().map(|m| m.m).collect()
+                    fill_lost_motions(&track.motions)
                 } else if source == MotionSource::Gyro {
                     gm
                 } else {
@@ -352,7 +352,12 @@ impl Plan {
         let smooth = smooth_trajectory(&path, &cfg.smoothing, w, h);
 
         let r = &cfg.render;
-        let (ow, oh) = if r.output_width > 0 { (r.output_width as f64, r.output_height as f64) } else { (w, h) };
+        // Video encoders (4:2:0) need even dimensions; drop one pixel from odd sizes.
+        let (ow, oh) = if r.output_width > 0 {
+            (r.output_width as f64, r.output_height as f64)
+        } else {
+            (((track.width & !1).max(2)) as f64, ((track.height & !1).max(2)) as f64)
+        };
         let k = (ow / w).max(oh / h);
         let (hw, hh) = (ow / k / 2.0, oh / k / 2.0);
 
@@ -470,6 +475,33 @@ impl Plan {
     }
 }
 
+/// Replace motions of frames where tracking was lost (confidence 0) by
+/// interpolating the nearest good neighbours, so a single blurred frame doesn't
+/// freeze the camera path for one step and cause a visible jump.
+pub fn fill_lost_motions(motions: &[FrameMotion]) -> Vec<Mat3> {
+    let n = motions.len();
+    let good: Vec<bool> = motions.iter().enumerate().map(|(t, m)| t == 0 || m.confidence > 0.0).collect();
+    let params: Vec<Params> = motions.iter().map(|m| Params::from_mat(&m.m)).collect();
+    (0..n)
+        .map(|t| {
+            if good[t] {
+                return motions[t].m;
+            }
+            let prev = (1..t).rev().find(|&i| good[i]);
+            let next = (t + 1..n).find(|&i| good[i]);
+            match (prev, next) {
+                (Some(a), Some(b)) => {
+                    let f = (t - a) as f64 / (b - a) as f64;
+                    params[a].scaled(1.0 - f).add(&params[b].scaled(f)).to_mat()
+                }
+                (Some(a), None) => params[a].to_mat(),
+                (None, Some(b)) => params[b].to_mat(),
+                (None, None) => Mat3::IDENTITY,
+            }
+        })
+        .collect()
+}
+
 /// Stateful renderer that keeps the previous frame (for the `previous` border
 /// mode) and applies the compare layout.
 #[derive(Default)]
@@ -507,5 +539,45 @@ impl Renderer {
         );
         self.out = out;
         Ok(&self.out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fm(tx: f64, conf: f32) -> FrameMotion {
+        FrameMotion { m: Mat3::translation(tx, 0.0), confidence: conf, inliers: 50, tracked: 50 }
+    }
+
+    #[test]
+    fn lost_frames_are_interpolated() {
+        let m = vec![FrameMotion::identity(), fm(2.0, 1.0), fm(0.0, 0.0), fm(0.0, 0.0), fm(8.0, 1.0), fm(0.0, 0.0)];
+        let f = fill_lost_motions(&m);
+        let tx: Vec<f64> = f.iter().map(|m| m.0[2]).collect();
+        assert_eq!(tx[0], 0.0);
+        assert!((tx[2] - 4.0).abs() < 1e-9 && (tx[3] - 6.0).abs() < 1e-9, "{tx:?}");
+        assert!((tx[5] - 8.0).abs() < 1e-9, "trailing lost frame reuses last good motion");
+    }
+
+    #[test]
+    fn odd_sizes_render_even_output() {
+        let t = MotionTrack { motions: vec![fm(1.0, 1.0); 10], ..MotionTrack::empty(321, 241, 30.0, 10) };
+        let p = Plan::build(&Config::default(), &t, None).unwrap();
+        assert_eq!((p.out_width, p.out_height), (320, 240));
+        let src = vec![128u8; 321 * 241 * 4];
+        let mut dst = vec![0u8; 320 * 240 * 4];
+        p.render(3, &src, &mut dst).unwrap();
+    }
+
+    #[test]
+    fn single_frame_and_empty_inputs() {
+        let t = MotionTrack::empty(64, 48, 30.0, 1);
+        for preset in ["handheld", "cinematic", "vehicle", "tripod"] {
+            Plan::build(&Config::preset(preset).unwrap(), &t, None).unwrap();
+        }
+        assert!(Plan::build(&Config::default(), &MotionTrack::empty(64, 48, 30.0, 0), None).is_err());
+        let t = MotionTrack::empty(64, 48, 30.0, 2);
+        Plan::build(&Config::preset("cinematic").unwrap(), &t, None).unwrap();
     }
 }

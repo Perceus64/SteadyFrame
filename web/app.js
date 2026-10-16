@@ -84,6 +84,15 @@ function setBusy(text, frac) {
 }
 
 // ── Frame access via the <video> element ────────────────────────────────
+// Seeking and grabbing must never interleave (fast scrubbing, playback, export),
+// or a frame gets captured for the wrong index. Every access goes through this lock.
+let videoLock = Promise.resolve();
+function withVideo(fn) {
+  const run = videoLock.then(fn, fn);
+  videoLock = run.catch(() => {});
+  return run;
+}
+
 const grabCanvas = new OffscreenCanvas(16, 16);
 const grabCtx = grabCanvas.getContext("2d", { willReadFrequently: true });
 
@@ -103,8 +112,12 @@ function seek(index) {
         setTimeout(finish, 120); // same frame twice: no new frame callback
       } else finish();
     };
-    if (Math.abs(video.currentTime - t) < 1e-4) return finish();
+    if (Math.abs(video.currentTime - t) < 1e-4 && !video.seeking) return finish();
     video.addEventListener("seeked", onSeeked);
+    setTimeout(() => {
+      video.removeEventListener("seeked", onSeeked);
+      finish();
+    }, 4000); // a stuck seek must not freeze the app
     video.currentTime = t;
   });
 }
@@ -116,6 +129,25 @@ function grab(w, h) {
   }
   grabCtx.drawImage(video, 0, 0, w, h);
   return grabCtx.getImageData(0, 0, w, h);
+}
+
+// Some files (e.g. WebM from MediaRecorder) report an infinite duration until
+// the browser is forced to scan to the end.
+async function ensureDuration() {
+  if (Number.isFinite(video.duration) && video.duration > 0) return true;
+  await new Promise((resolve) => {
+    const onChange = () => {
+      if (Number.isFinite(video.duration)) {
+        video.removeEventListener("durationchange", onChange);
+        resolve();
+      }
+    };
+    video.addEventListener("durationchange", onChange);
+    setTimeout(resolve, 8000);
+    video.currentTime = 1e101;
+  });
+  video.currentTime = 0;
+  return Number.isFinite(video.duration) && video.duration > 0;
 }
 
 async function detectFps() {
@@ -135,9 +167,14 @@ async function detectFps() {
   const d = [];
   for (let i = 1; i < times.length; i++) if (times[i] > times[i - 1]) d.push(times[i] - times[i - 1]);
   if (d.length < 3) return 30;
-  d.sort((a, b) => a - b);
-  const fps = 1 / d[Math.floor(d.length / 4)]; // lower quartile: robust to dropped frames
-  const common = [23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60, 100, 119.88, 120, 240];
+  const sorted = [...d].sort((a, b) => a - b);
+  const med = sorted[Math.floor(sorted.length / 2)];
+  // Average over the gaps that aren't dropped frames: far more precise than one gap,
+  // which matters for telling 23.976 from 24 fps.
+  const good = d.filter((x) => x < med * 1.5);
+  const fps = good.length / good.reduce((a, b) => a + b, 0);
+  // Exact NTSC rates (24000/1001 etc.) so timestamps don't drift on long clips.
+  const common = [24000 / 1001, 24, 25, 30000 / 1001, 30, 48, 50, 60000 / 1001, 60, 100, 120000 / 1001, 120, 240];
   const best = common.reduce((a, c) => (Math.abs(c - fps) < Math.abs(a - fps) ? c : a));
   return Math.abs(best - fps) / best < 0.03 ? best : Math.round(fps * 100) / 100;
 }
@@ -275,8 +312,11 @@ function renderControls() {
 }
 
 function updateReanalyzeBadges() {
-  const stale = S.analysed && S.analysedWith && S.analysedWith !== analysisKey(S.cfg);
+  const stale = !!(S.analysed && S.analysedWith && S.analysedWith !== analysisKey(S.cfg));
   for (const c of controls) if (c.f.badge) c.f.badge.hidden = !stale;
+  const btn = $("reanalyze");
+  btn.classList.toggle("primary", stale);
+  btn.classList.toggle("ghost", !stale);
 }
 
 function buildSettings() {
@@ -292,6 +332,15 @@ function buildSettings() {
     d.append(s, fields);
     host.append(d);
     for (const f of sec.fields) buildField(f, fields);
+    if (sec.title === "Motion analysis") {
+      const b = document.createElement("button");
+      b.id = "reanalyze";
+      b.className = "btn ghost small";
+      b.textContent = "Re-analyze video";
+      b.disabled = true;
+      b.addEventListener("click", () => analyze());
+      fields.append(b);
+    }
   }
   for (const f of GYRO_FIELDS) buildField(f, $("gyroFields"));
 }
@@ -323,8 +372,13 @@ async function loadVideo(file) {
   if (S.busy) return toast("Wait for the current task to finish.", true);
   S.file = file;
   S.analysed = false;
+  S.analysedWith = null;
   S.plan = null;
-  S.cache.clear();
+  S.frame = 0;
+  S.playing = false;
+  clearCache();
+  enableUi(false);
+  $("stats").replaceChildren();
   if (video.src) URL.revokeObjectURL(video.src);
   video.src = URL.createObjectURL(file);
   try {
@@ -339,12 +393,20 @@ async function loadVideo(file) {
   S.h = video.videoHeight;
   $("drop").hidden = true;
   $("workspace").hidden = false;
+  setBusy("Reading video…", 0);
+  if (!(await ensureDuration())) {
+    setBusy(null);
+    return toast("Couldn't read the video's length. Try re-saving it as MP4.", true);
+  }
   setBusy("Measuring frame rate…", 0);
   S.fps = await detectFps();
   S.frames = Math.max(1, Math.floor(video.duration * S.fps + 1e-6));
-  $("meta").textContent = `${file.name}, ${S.w}×${S.h}, ${S.fps} fps, ${S.frames} frames`;
+  $("meta").textContent = `${file.name}, ${S.w}×${S.h}, ${+S.fps.toFixed(3)} fps, ${S.frames} frames`;
   $("scrub").max = S.frames - 1;
+  $("scrub").value = 0;
+  $("frameNo").textContent = `1 / ${S.frames}`;
   sizeCanvas(S.w, S.h);
+  vctx.clearRect(0, 0, view.width, view.height);
   try {
     await rpc("init", { width: S.w, height: S.h, fps: S.fps, config: JSON.stringify(S.cfg) });
   } catch (e) {
@@ -361,14 +423,19 @@ async function analyze() {
   S.busy = true;
   S.cancel = false;
   enableUi(false);
+  const key = analysisKey(S.cfg);
+  S.analysed = false;
+  updateReanalyzeBadges();
   try {
     await rpc("config", { config: JSON.stringify(S.cfg) });
     const { aw, ah } = await rpc("reset");
     const t0 = performance.now();
     for (let i = 0; i < S.frames; i++) {
-      if (S.cancel) throw new Error("Analysis cancelled.");
-      await seek(i);
-      const img = grab(aw, ah);
+      if (S.cancel) throw new Error("Analysis cancelled. Press Re-analyze to try again.");
+      const img = await withVideo(async () => {
+        await seek(i);
+        return grab(aw, ah);
+      });
       await rpc("push", { buf: img.data.buffer, w: aw, h: ah }, [img.data.buffer]);
       if (i % 3 === 0) {
         const rate = (i + 1) / ((performance.now() - t0) / 1000);
@@ -378,7 +445,7 @@ async function analyze() {
     }
     await rpc("finish");
     S.analysed = true;
-    S.analysedWith = analysisKey(S.cfg);
+    S.analysedWith = key;
   } catch (e) {
     toast(e.message, true);
   } finally {
@@ -387,10 +454,12 @@ async function analyze() {
   }
   if (S.analysed) await replan();
   enableUi(S.analysed);
+  updateReanalyzeBadges();
 }
 
 function enableUi(on) {
   for (const id of ["export", "play", "scrub", "saveTrack", "savePlan"]) $(id).disabled = !on;
+  $("reanalyze").disabled = !S.file || S.busy;
 }
 
 async function replan() {
@@ -398,7 +467,7 @@ async function replan() {
   try {
     await rpc("config", { config: JSON.stringify(S.cfg) });
     S.plan = await rpc("plan");
-    S.cache.clear();
+    clearCache();
     showStats();
     drawGraph();
     await showFrame(S.frame);
@@ -447,6 +516,12 @@ function sizeCanvas(w, h) {
   $("viewer").style.aspectRatio = `${w} / ${h}`;
 }
 
+function clearCache() {
+  for (const c of S.cache.values()) c.orig.close?.();
+  S.cache.clear();
+}
+
+// Must be called inside withVideo().
 async function getFrame(index) {
   let c = S.cache.get(index);
   if (c) return c;
@@ -468,13 +543,18 @@ async function getFrame(index) {
 const stabCanvas = new OffscreenCanvas(16, 16);
 const stabCtx = stabCanvas.getContext("2d");
 
+let showToken = 0;
 async function showFrame(index) {
+  index = Math.max(0, Math.min(S.frames - 1, index | 0));
+  const token = ++showToken;
   S.frame = index;
   $("scrub").value = index;
   $("frameNo").textContent = `${index + 1} / ${S.frames}`;
   if (!S.plan) return;
-  const { orig, stab } = await getFrame(index);
-  if (S.frame !== index) return;
+  // Latest request wins: stale requests skip their seek entirely.
+  const c = await withVideo(() => (token === showToken ? getFrame(index) : null));
+  if (!c || token !== showToken) return;
+  const { orig, stab } = c;
   if (stabCanvas.width !== stab.width || stabCanvas.height !== stab.height) {
     stabCanvas.width = stab.width;
     stabCanvas.height = stab.height;
@@ -505,8 +585,16 @@ async function showFrame(index) {
   drawGraph();
 }
 
-function positionDivider() {
+// Where the picture actually sits inside the canvas (object-fit: contain).
+function imageRect() {
   const r = view.getBoundingClientRect();
+  const k = Math.min(r.width / view.width, r.height / view.height);
+  const w = view.width * k, h = view.height * k;
+  return { left: r.left + (r.width - w) / 2, top: r.top + (r.height - h) / 2, width: w, height: h };
+}
+
+function positionDivider() {
+  const r = imageRect();
   const pr = $("viewer").getBoundingClientRect();
   $("divider").style.left = `${r.left - pr.left + S.split * r.width}px`;
 }
@@ -593,6 +681,7 @@ async function exportVideo() {
   if (S.busy || !S.analysed) return;
   S.playing = false;
   S.busy = true;
+  setBusy("Preparing export…", 0);
   S.cancel = false;
   enableUi(false);
   const compare = $("exportCompare").checked;
@@ -605,8 +694,11 @@ async function exportVideo() {
     const bitrate = Number($("bitrate").value) * 1e6;
     const blob = "VideoEncoder" in window ? await encodeMp4(ow, oh, bitrate) : await encodeWebm(ow, oh, bitrate);
     if (blob) {
-      download(`${baseName()}_stabilized.${blob.type.includes("webm") ? "webm" : "mp4"}`, blob);
-      toast("Export finished.");
+      const webm = blob.type.includes("webm");
+      download(`${baseName()}_stabilized.${webm ? "webm" : "mp4"}`, blob);
+      toast(webm ? "Export finished (WebM: this browser can't encode MP4)." : "Export finished.");
+    } else if (S.cancel) {
+      toast("Export cancelled.");
     }
   } catch (e) {
     toast(`Export failed: ${e.message}`, true);
@@ -636,12 +728,21 @@ async function pickCodec(w, h, bitrate) {
   return null;
 }
 
+// mp4-muxer's `frameRate` is really the track timescale and must be an integer.
+// Pick one that represents every frame time exactly: 30 for 30 fps, 30000 for 29.97 fps.
+function mp4Timescale(fps) {
+  if (Math.abs(fps - Math.round(fps)) < 1e-6) return Math.round(fps);
+  const ntsc = Math.round(fps * 1.001);
+  if (Math.abs(ntsc / 1.001 - fps) < 1e-3) return ntsc * 1000;
+  return 90000; // other fractional rates: standard video timescale
+}
+
 async function encodeMp4(w, h, bitrate) {
   const picked = await pickCodec(w, h, bitrate);
   if (!picked) return encodeWebm(w, h, bitrate);
   const { Muxer, ArrayBufferTarget } = await import("./vendor/mp4-muxer.mjs");
   const target = new ArrayBufferTarget();
-  const muxer = new Muxer({ target, video: { codec: picked.mux, width: w, height: h, frameRate: S.fps }, fastStart: "in-memory" });
+  const muxer = new Muxer({ target, video: { codec: picked.mux, width: w, height: h, frameRate: mp4Timescale(S.fps) }, fastStart: "in-memory" });
   let encErr = null;
   const enc = new VideoEncoder({ output: (c, m) => muxer.addVideoChunk(c, m), error: (e) => (encErr = e) });
   enc.configure(picked.config);
@@ -650,12 +751,13 @@ async function encodeMp4(w, h, bitrate) {
   for (let i = 0; i < S.frames; i++) {
     if (S.cancel) {
       enc.close();
-      toast("Export cancelled.");
       return null;
     }
     if (encErr) throw encErr;
-    await seek(i);
-    const full = grab(S.w, S.h);
+    const full = await withVideo(async () => {
+      await seek(i);
+      return grab(S.w, S.h);
+    });
     const r = await rpc("render", { index: i, buf: full.data.buffer }, [full.data.buffer]);
     const frame = new VideoFrame(new Uint8Array(r.buf), { format: "RGBA", codedWidth: r.w, codedHeight: r.h, timestamp: Math.round(i * dur), duration: Math.round(dur) });
     enc.encode(frame, { keyFrame: i % gop === 0 });
@@ -684,8 +786,10 @@ async function encodeWebm(w, h, bitrate) {
   rec.start();
   for (let i = 0; i < S.frames && !S.cancel; i++) {
     const t = performance.now();
-    await seek(i);
-    const full = grab(S.w, S.h);
+    const full = await withVideo(async () => {
+      await seek(i);
+      return grab(S.w, S.h);
+    });
     const r = await rpc("render", { index: i, buf: full.data.buffer }, [full.data.buffer]);
     ctx.putImageData(new ImageData(new Uint8ClampedArray(r.buf), r.w, r.h), 0, 0);
     track.requestFrame?.();
@@ -706,7 +810,9 @@ function updateGyroUi() {
 
 async function loadGyro(file) {
   if (!S.file) return toast("Open a video first.", true);
+  if (S.busy) return toast("Wait for the current task to finish.", true);
   try {
+    await rpc("config", { config: JSON.stringify(S.cfg) });
     const isBin = /\.(bin|gpmf)$/i.test(file.name);
     const info = isBin
       ? await rpc("gpmf", { buf: await file.arrayBuffer() })
@@ -741,8 +847,22 @@ async function main() {
   $("presetDesc").textContent = S.presets[0][1];
   renderControls();
 
-  sel.addEventListener("change", () => sel.value && applyPreset(sel.value));
-  $("file").addEventListener("change", (e) => e.target.files[0] && loadVideo(e.target.files[0]));
+  sel.addEventListener("change", () => {
+    if (!sel.value) return;
+    if (S.busy) {
+      toast("Wait for the current task to finish.", true);
+      return;
+    }
+    applyPreset(sel.value);
+  });
+  for (const [btn, input] of [["openBtn", "file"], ["chooseBtn", "file"], ["gyroBtn", "gyroFile"], ["loadTrackBtn", "loadTrack"], ["loadConfigBtn", "loadConfig"]]) {
+    $(btn).addEventListener("click", () => $(input).click());
+  }
+  $("file").addEventListener("change", (e) => {
+    const f = e.target.files[0];
+    e.target.value = "";
+    if (f) loadVideo(f);
+  });
   const drop = $("drop");
   for (const ev of ["dragenter", "dragover"]) drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); });
   for (const ev of ["dragleave", "drop"]) drop.addEventListener(ev, () => drop.classList.remove("over"));
@@ -754,13 +874,14 @@ async function main() {
 
   $("cancel").addEventListener("click", () => (S.cancel = true));
   $("scrub").addEventListener("input", (e) => {
+    if (S.busy) return;
     S.playing = false;
     showFrame(Number(e.target.value));
   });
-  $("play").addEventListener("click", play);
+  $("play").addEventListener("click", () => !S.busy && play());
   $("channel").addEventListener("change", drawGraph);
   graph.addEventListener("click", (e) => {
-    if (!S.plan) return;
+    if (!S.plan || S.busy) return;
     const r = graph.getBoundingClientRect();
     const f = Math.round(((e.clientX - r.left - 10) / (r.width - 20)) * (S.frames - 1));
     S.playing = false;
@@ -770,31 +891,37 @@ async function main() {
     b.addEventListener("click", () => {
       S.mode = b.dataset.mode;
       for (const o of document.querySelectorAll(".segmented button")) o.setAttribute("aria-checked", String(o === b));
-      showFrame(S.frame);
+      if (!S.busy) showFrame(S.frame);
     });
   }
   // Split divider drag
   const div = $("divider");
   const drag = (e) => {
-    const r = view.getBoundingClientRect();
+    const r = imageRect();
     S.split = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
-    showFrame(S.frame);
+    if (!S.busy) showFrame(S.frame);
   };
   div.addEventListener("pointerdown", (e) => {
     div.setPointerCapture(e.pointerId);
     div.addEventListener("pointermove", drag);
   });
-  div.addEventListener("pointerup", () => div.removeEventListener("pointermove", drag));
+  const endDrag = () => div.removeEventListener("pointermove", drag);
+  div.addEventListener("pointerup", endDrag);
+  div.addEventListener("pointercancel", endDrag);
   window.addEventListener("resize", () => { drawGraph(); if (S.mode === "split") positionDivider(); });
   document.addEventListener("keydown", (e) => {
-    if (!S.plan || e.target.matches("input, select, textarea")) return;
+    if (!S.plan || S.busy || e.target.closest("input, select, textarea, button, summary, [contenteditable]")) return;
     if (e.key === "ArrowRight") showFrame(Math.min(S.frames - 1, S.frame + 1));
     else if (e.key === "ArrowLeft") showFrame(Math.max(0, S.frame - 1));
     else if (e.key === " ") { e.preventDefault(); play(); }
   });
 
   $("export").addEventListener("click", exportVideo);
-  $("gyroFile").addEventListener("change", (e) => e.target.files[0] && loadGyro(e.target.files[0]));
+  $("gyroFile").addEventListener("change", (e) => {
+    const f = e.target.files[0];
+    e.target.value = "";
+    if (f) loadGyro(f);
+  });
   $("gyroClear").addEventListener("click", async () => {
     await rpc("clearGyro");
     S.hasGyro = false;
@@ -808,6 +935,7 @@ async function main() {
   $("saveConfig").addEventListener("click", () => download("steadyframe.config.json", JSON.stringify(S.cfg, null, 2)));
   $("loadConfig").addEventListener("change", async (e) => {
     const f = e.target.files[0];
+    e.target.value = "";
     if (!f) return;
     try {
       S.cfg = await rpc("validate", { config: await readJsonFile(f) });
@@ -821,10 +949,15 @@ async function main() {
   });
   $("loadTrack").addEventListener("change", async (e) => {
     const f = e.target.files[0];
+    e.target.value = "";
     if (!f) return;
     if (!S.file) return toast("Open the matching video first.", true);
+    if (S.busy) return toast("Wait for the current task to finish.", true);
     try {
-      await rpc("importTrack", { json: await readJsonFile(f) });
+      const json = await readJsonFile(f);
+      const frames = JSON.parse(json).motions?.length;
+      await rpc("importTrack", { json });
+      if (frames && frames !== S.frames) toast(`Track has ${frames} frames, video has ${S.frames}; extra frames reuse the last motion.`);
       S.analysed = true;
       S.analysedWith = analysisKey(S.cfg);
       enableUi(true);

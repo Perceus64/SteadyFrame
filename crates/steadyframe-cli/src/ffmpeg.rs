@@ -14,7 +14,8 @@ pub struct Probe {
     pub fps_str: String,
     pub fps: f64,
     pub frames_estimate: Option<usize>,
-    pub has_audio: bool,
+    /// Codec of the first audio stream, if any.
+    pub audio_codec: Option<String>,
     /// Stream index of a GoPro GPMF (`gpmd`) data track, if any.
     pub gpmf_stream: Option<usize>,
     pub codec: String,
@@ -91,7 +92,10 @@ impl Tools {
             .and_then(|n| n.parse::<usize>().ok())
             .filter(|n| *n > 0)
             .or_else(|| duration.map(|d| (d * fps).round() as usize));
-        let has_audio = streams.iter().any(|s| s["codec_type"] == "audio");
+        let audio_codec = streams
+            .iter()
+            .find(|s| s["codec_type"] == "audio")
+            .map(|s| s["codec_name"].as_str().unwrap_or("unknown").to_string());
         let gpmf_stream = streams
             .iter()
             .find(|s| {
@@ -109,7 +113,7 @@ impl Tools {
             fps_str,
             fps,
             frames_estimate,
-            has_audio,
+            audio_codec,
             gpmf_stream,
             codec: video["codec_name"].as_str().unwrap_or("?").to_string(),
         })
@@ -188,7 +192,7 @@ impl Tools {
         w: u32,
         h: u32,
         fps_str: &str,
-        has_audio: bool,
+        audio_codec: Option<&str>,
     ) -> Result<Encoder> {
         let mut cmd = Command::new(&self.ffmpeg);
         cmd.args([
@@ -206,13 +210,31 @@ impl Tools {
             "-i",
             "-",
         ]);
-        let audio = has_audio && opts.audio != "none";
+        let audio = audio_codec.is_some() && opts.audio != "none";
+        let ext = output.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        let mp4_like = matches!(ext.as_str(), "mp4" | "mov" | "m4v");
+        // "copy" only works when the container can hold the source audio codec
+        // (e.g. camera .MOV files often carry PCM, which MP4 can't).
+        let audio_codec_arg = match (opts.audio.as_str(), audio_codec) {
+            ("copy", Some(c)) if ext == "mp4" || ext == "m4v" => {
+                if matches!(c, "aac" | "mp3" | "alac" | "ac3" | "eac3" | "opus" | "flac") {
+                    "copy".to_string()
+                } else {
+                    "aac".to_string()
+                }
+            }
+            ("copy", Some(c)) if ext == "webm" && !matches!(c, "opus" | "vorbis") => "libopus".to_string(),
+            (a, _) => a.to_string(),
+        };
         if audio {
             cmd.arg("-i").arg(input);
         }
         cmd.args(["-map", "0:v:0"]);
         if audio {
-            cmd.args(["-map", "1:a?", "-c:a", &opts.audio]);
+            cmd.args(["-map", "1:a?", "-c:a", &audio_codec_arg]);
+            if audio_codec_arg == "aac" {
+                cmd.args(["-b:a", "192k"]);
+            }
         }
         cmd.args(["-c:v", &opts.codec]);
         let c = opts.codec.as_str();
@@ -226,10 +248,25 @@ impl Tools {
             cmd.args(["-preset", &opts.preset]);
         }
         if !opts.pix_fmt.is_empty() {
-            cmd.args(["-pix_fmt", &opts.pix_fmt]);
+            if opts.pix_fmt.starts_with("yuv") {
+                // Convert RGB→YUV with BT.709 (HD) coefficients and tag the stream,
+                // otherwise players shift colours slightly.
+                cmd.args(["-vf", &format!("scale=out_color_matrix=bt709:out_range=tv,format={}", opts.pix_fmt)]);
+                cmd.args([
+                    "-colorspace",
+                    "bt709",
+                    "-color_primaries",
+                    "bt709",
+                    "-color_trc",
+                    "bt709",
+                    "-color_range",
+                    "tv",
+                ]);
+            } else {
+                cmd.args(["-pix_fmt", &opts.pix_fmt]);
+            }
         }
-        let ext = output.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-        if matches!(ext.as_str(), "mp4" | "mov" | "m4v") {
+        if mp4_like {
             cmd.args(["-movflags", "+faststart"]);
             if c == "libx265" {
                 cmd.args(["-tag:v", "hvc1"]);

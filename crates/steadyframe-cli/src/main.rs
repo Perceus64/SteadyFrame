@@ -649,7 +649,7 @@ fn process(cli: &Cli, base_cfg: &Config, tools: &Tools, input: &Path, idx: usize
             extra: cli.ffmpeg_args.clone(),
         };
         let dec = tools.decoder(input, None, "rgba", (probe.width * probe.height * 4) as usize)?;
-        let enc = tools.encoder(&enc_opts, input, &out, fw, fh, &probe.fps_str, probe.has_audio)?;
+        let enc = tools.encoder(&enc_opts, input, &out, fw, fh, &probe.fps_str, probe.audio_codec.as_deref())?;
         // Pipeline: decode thread → render (this thread, multi-core warp) → encode thread.
         let limit = cli.max_frames.map(|_| plan.len());
         let (ftx, frx) = std::sync::mpsc::sync_channel::<Vec<u8>>(3);

@@ -207,3 +207,50 @@ fn gyro_auto_sync_recovers_offset_orientation_and_focal() {
     assert!(plan.stats.gyro_sync.is_some());
     assert!(plan.stats.reduction_pct > 50.0, "{}", plan.stats.reduction_pct);
 }
+
+#[test]
+fn rolling_shutter_correction_straightens_skew() {
+    // Camera pans right v px/frame; each row is read out later than the one above,
+    // so vertical edges appear slanted. RS correction must make them vertical again.
+    let (w, h, v, readout) = (200usize, 100usize, 20.0f64, 0.8f64);
+    let n = 6;
+    let frame = |t: usize| {
+        let mut f = vec![0u8; w * h * 4];
+        for y in 0..h {
+            let tau = (y as f64 + 0.5 - h as f64 / 2.0) / h as f64;
+            for x in 0..w {
+                let bx = x as f64 + v * t as f64 + v * readout * tau;
+                let c = if (bx / 25.0).floor() as i64 % 2 == 0 { 255 } else { 0 };
+                f[(y * w + x) * 4..(y * w + x) * 4 + 4].copy_from_slice(&[c, c, c, 255]);
+            }
+        }
+        f
+    };
+    let motions = (0..n)
+        .map(|t| FrameMotion {
+            m: if t == 0 { Mat3::IDENTITY } else { Mat3::translation(-v, 0.0) },
+            confidence: 1.0,
+            inliers: 99,
+            tracked: 99,
+        })
+        .collect();
+    let track = MotionTrack { motions, ..MotionTrack::empty(w as u32, h as u32, 30.0, n) };
+    // Edge x-position spread across rows (0 = perfectly vertical edge).
+    let slant = |rs: bool| {
+        let mut c = Config::default();
+        c.smoothing.translation = 0.0; // isolate the rolling-shutter warp
+        c.crop.mode = CropMode::None;
+        c.rolling_shutter.enabled = rs;
+        c.rolling_shutter.readout = readout;
+        let plan = Plan::build(&c, &track, None).unwrap();
+        let mut out = vec![0u8; w * h * 4];
+        plan.render(3, &frame(3), &mut out).unwrap();
+        let edges: Vec<f64> = (10..h - 10)
+            .map(|y| (60..w - 60).find(|&x| out[(y * w + x) * 4] != out[(y * w + x - 1) * 4]).unwrap_or(0) as f64)
+            .collect();
+        edges.iter().cloned().fold(f64::MIN, f64::max) - edges.iter().cloned().fold(f64::MAX, f64::min)
+    };
+    let (off, on) = (slant(false), slant(true));
+    assert!(off > 10.0, "test input should be visibly skewed ({off})");
+    assert!(on <= 2.0, "rolling-shutter correction left {on}px of skew (was {off})");
+}

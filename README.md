@@ -21,6 +21,7 @@ Video stabilization written in Rust that runs in three places from one engine:
 
 **Rendering**
 - Fixed or **dynamic** auto-zoom to hide borders, with a max-zoom cap
+- Frames where tracking is lost (heavy blur, flashes) are bridged by interpolating their neighbours
 - Border fill: black, color, stretch, mirror, or previous frame
 - Nearest, bilinear or bicubic interpolation
 - **Rolling-shutter (jello) correction** per row
@@ -161,6 +162,8 @@ To publish a release: push a tag like `v0.1.0`. The release workflow builds bina
 - Stabilization is 2D (projective). Strong parallax (close foreground passing a distant background) can't be fully removed by any 2D method.
 - Browser analysis extracts frames by seeking, so very long clips analyse slower in the browser than in the CLI.
 - Variable-frame-rate video is treated as constant frame rate.
+- Output is 8-bit SDR (BT.709). HDR/10-bit sources are converted, so HDR footage will look flatter than the original.
+- Audio is copied when the output container supports it; otherwise (e.g. PCM from camera `.MOV` files into MP4) it is re-encoded to AAC 192 kb/s.
 - GoPro GPMF timing uses payload timestamps; very old firmware without them falls back to one payload per second, which auto-sync then corrects.
 
 ## License
